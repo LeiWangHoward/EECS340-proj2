@@ -10,7 +10,7 @@ int main() {
     MinetConnect(MINET_SOCK_MODULE);
 
     while (1) {
-	cerr << "la ";
+	cerr << "soka ";
 	sleep(1);
     }
 }

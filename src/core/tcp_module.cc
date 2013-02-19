@@ -14,6 +14,7 @@
 #include <iostream>
 
 #include "Minet.h"
+#include "tcpstate.h"
 //#include "tcp_in.h"
 
 using std::cout;
@@ -25,7 +26,7 @@ int main(int argc, char *argv[])
 {
   MinetHandle mux, sock;//Multiplexor and Socket
 
-  //ConnectionList<TCPState> ConnList;
+  ConnectionList<TCPState> clist;//TODO
 
   MinetInit(MINET_TCP_MODULE);//initialize tcp module
 
@@ -60,19 +61,49 @@ int main(int argc, char *argv[])
       //  Data from the IP layer below  //
       if (event.handle==mux) {
 	Packet p;
+	unsigned short len;
+	bool checkSumOK;
 	MinetReceive(mux,p);
 	unsigned tcphlen=TCPHeader::EstimateTCPHeaderLength(p);
 	cerr << "estimated header len="<<tcphlen<<"\n";
 	p.ExtractHeaderFromPayload<TCPHeader>(tcphlen);
 	IPHeader ipl=p.FindHeader(Headers::IPHeader);
 	TCPHeader tcph=p.FindHeader(Headers::TCPHeader);
-
+        checkSumOK=tcph.IsCorrectChecksum(p);
+        cerr << "Checksum is " << (checkSumOK ? "VALID" : "INVALID"); 
+        Connection c;
+	//Flip around, "source" is "this machine"
+	ipl.GetDestIP(c.src);
+	ipl.GetSourceIP(c.dest);
+	ipl.GetProtocol(c.protocol);
+	tcph.GetDestPort(c.srcport);
+	tcph.GetSourcePort(c.destport);
 	cerr << "TCP Packet: IP Header is "<<ipl<<" and ";
 	cerr << "TCP Header is "<<tcph << " and ";
-
-	cerr << "Checksum is " << (tcph.IsCorrectChecksum(p) ? "VALID" : "INVALID");
-	
+        ConnectionList<TCPState>::iterator cs = clist.FindMatching(c); 
+	if (cs!=clist.end()) {
+	  //tcph.GetLength(len);//TODO
+	  //len-=TCP_HEADER_LENGTH;//TODO
+	  Buffer &data = p.GetPayload().ExtractFront(len);
+	  /*SockRequestResponse write(WRITE,
+				    (*cs).connection,
+				     data,
+				     len,
+				     EOK);*/
+	  if (!checkSumOK) {
+		MinetSendToMonitor(MinetMonitoringEvent("forwarding packet to sock even though checksum failed"));
+	  }
+	  //MinetSend(sock,write);//TODO
+	} else {
+	  MinetSendToMonitor(MinetMonitoringEvent("Unknown port, sending ICMP error message"));
+	  IPAddress source;
+	  ipl.GetSourceIP(source);
+	  ICMPPacket error(source,DESTINATION_UNREACHABLE,PORT_UNREACHABLE,p);
+	  MinetSendToMonitor(MinetMonitoringEvent("ICMP error message has been sent to host"));
+	  MinetSend(mux, error);
+	}
       }
+
       //  Data from the Sockets layer above  //
       if (event.handle==sock) {
 	SockRequestResponse s;
