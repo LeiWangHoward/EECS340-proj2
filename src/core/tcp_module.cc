@@ -26,7 +26,7 @@ int main(int argc, char *argv[])
 {
   MinetHandle mux, sock;//Multiplexor and Socket
 
-  ConnectionList<TCPState> clist;//TODO
+  ConnectionList<TCPState> clist;
 
   MinetInit(MINET_TCP_MODULE);//initialize tcp module
 
@@ -49,7 +49,7 @@ int main(int argc, char *argv[])
 
   MinetEvent event;
 
-  cout<<"TCP start working now"<<endl;
+  cout<<"TCP start working now"<<endl;//test
 
   while (MinetGetNextEvent(event)==0) {
     // if we received an unexpected type of event, print error
@@ -58,46 +58,128 @@ int main(int argc, char *argv[])
       MinetSendToMonitor(MinetMonitoringEvent("Unknown event ignored."));
     // if we received a valid event from Minet, do processing
     } else {
-      //  Data from the IP layer below  //
       if (event.handle==mux) {
 	Packet p;
-	unsigned short len;
 	bool checkSumOK;
+	
+	unsigned int ackNum;
+	unsigned int seqNum;
+	unsigned char flags;
+	unsigned short windowSize;
+
 	MinetReceive(mux,p);
+	//estimate tcp header length
 	unsigned tcphlen=TCPHeader::EstimateTCPHeaderLength(p);
-	cerr << "estimated header len="<<tcphlen<<"\n";
+	//cerr << "estimated header len="<<tcphlen<<"\n";//TEST
 	p.ExtractHeaderFromPayload<TCPHeader>(tcphlen);
-	IPHeader ipl=p.FindHeader(Headers::IPHeader);
+	//Find TCP and IP header
+	IPHeader iph=p.FindHeader(Headers::IPHeader);
 	TCPHeader tcph=p.FindHeader(Headers::TCPHeader);
         checkSumOK=tcph.IsCorrectChecksum(p);
-        cerr << "Checksum is " << (checkSumOK ? "VALID" : "INVALID"); 
+        //cerr << "Checksum is " << (checkSumOK ? "VALID" : "INVALID");//TEST 
         Connection c;
+	
 	//Flip around, "source" is "this machine"
-	ipl.GetDestIP(c.src);
-	ipl.GetSourceIP(c.dest);
-	ipl.GetProtocol(c.protocol);
+	//Handle IP header
+	iph.GetDestIP(c.src);
+	iph.GetSourceIP(c.dest);
+	iph.GetProtocol(c.protocol);
+	//Handle TCP header
 	tcph.GetDestPort(c.srcport);
 	tcph.GetSourcePort(c.destport);
-	cerr << "TCP Packet: IP Header is "<<ipl<<" and ";
-	cerr << "TCP Header is "<<tcph << " and ";
+	tcph.GetSeqNum(seqNum);
+	tcph.GetAckNum(ackNum);
+	tcph.GetFlags(flags);
+	tcph.GetWinSize(windowSize);
+	//cerr << "TCP Packet: IP Header is "<<ipl<<" and "; //TEST
+	//cerr << "TCP Header is "<<tcph << " and ";  //TEST
+	
+	unsigned short len;
+	unsigned char iph_len;
+	unsigned char tcph_len;
+	checkSumOK = tcph.IsCorrectChecksum(p);
         ConnectionList<TCPState>::iterator cs = clist.FindMatching(c); 
 	if (cs!=clist.end()) {
-	  //tcph.GetLength(len);//TODO
-	  //len-=TCP_HEADER_LENGTH;//TODO
+          iph.GetTotalLength(len);
+          iph.GetHeaderLength(iph_len);
+          tcph.GetHeaderLen(tcph_len);
+          len  = len - (iph_len + tcph_len);
 	  Buffer &data = p.GetPayload().ExtractFront(len);
-	  /*SockRequestResponse write(WRITE,
+	  
+	  //Now handle connection state
+	  ConnectionToStateMapping<TCPState> &connState = *cs;
+	  unsigned int currentState = connState.state.GetState();
+	  switch (currentState) {
+		case CLOSED:
+		{
+		  cout<< "Receiver wait to be open"<<endl;
+		  break;
+		}
+		case LISTEN:
+		{
+		  if (IS_SYN(flags))
+		  {
+			;//<#statements#>
+		  }
+	        }
+		case SYN_RCVD:
+		{
+			;
+		}
+		case SYN_SENT:
+		{
+			;
+		}
+		case SYN_SENT1:
+		{
+			break;
+		}
+		case ESTABLISHED:
+		{
+			;
+		}
+		case SEND_DATA:
+		{
+			;
+		}
+		case CLOSE_WAIT:
+		{
+			;
+		}
+		case FIN_WAIT1:
+		{
+			;
+		}
+		case CLOSING:
+		{
+			;
+		}
+		case LAST_ACK:
+		{
+			;
+		}
+		case FIN_WAIT2:
+		{
+			;
+		}
+		case TIME_WAIT:
+		{
+			;
+		}
+	  }
+	  SockRequestResponse write(WRITE,
 				    (*cs).connection,
 				     data,
 				     len,
-				     EOK);*/
+				     EOK);
 	  if (!checkSumOK) {
-		MinetSendToMonitor(MinetMonitoringEvent("forwarding packet to sock even though checksum failed"));
-	  }
-	  //MinetSend(sock,write);//TODO
+	    MinetSendToMonitor(MinetMonitoringEvent("forwarding packet to sock even though checksum failed"));
+	   }
+	  MinetSend(sock,write);
 	} else {
 	  MinetSendToMonitor(MinetMonitoringEvent("Unknown port, sending ICMP error message"));
 	  IPAddress source;
-	  ipl.GetSourceIP(source);
+	  iph.GetSourceIP(source);
 	  ICMPPacket error(source,DESTINATION_UNREACHABLE,PORT_UNREACHABLE,p);
 	  MinetSendToMonitor(MinetMonitoringEvent("ICMP error message has been sent to host"));
 	  MinetSend(mux, error);
