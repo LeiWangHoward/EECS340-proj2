@@ -15,12 +15,21 @@
 
 #include "Minet.h"
 #include "tcpstate.h"
-//#include "tcp_in.h"
+#include "tcp.h"
 
 using std::cout;
 using std::endl;
 using std::cerr;
 using std::string;
+
+//Prototype
+void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal);
+
+//My signal representation for createPacket();
+const int SIG_SYN_ACK = 0;
+const int SIG_ACK = 1;
+const int SIG_SYN = 2;
+const int SIG_FIN = 3;
 
 int main(int argc, char *argv[])
 {
@@ -79,7 +88,7 @@ int main(int argc, char *argv[])
         //cerr << "Checksum is " << (checkSumOK ? "VALID" : "INVALID");//TEST 
         Connection c;
 	
-	//Flip around, "source" is "this machine"
+	//Flip around, change source to "this machine", source is the machine we receive packet from
 	//Handle IP header
 	iph.GetDestIP(c.src);
 	iph.GetSourceIP(c.dest);
@@ -89,7 +98,7 @@ int main(int argc, char *argv[])
 	tcph.GetSourcePort(c.destport);
 	tcph.GetSeqNum(seqNum);
 	tcph.GetAckNum(ackNum);
-	tcph.GetFlags(flags);
+	tcph.GetFlags(flags);//now we know what we need to do
 	tcph.GetWinSize(windowSize);
 	//cerr << "TCP Packet: IP Header is "<<ipl<<" and "; //TEST
 	//cerr << "TCP Header is "<<tcph << " and ";  //TEST
@@ -113,13 +122,15 @@ int main(int argc, char *argv[])
 		case CLOSED:
 		{
 		  cout<< "Receiver wait to be open"<<endl;
-		  break;
 		}
+		 break;
+
 		case LISTEN:
 		{
 		  if (IS_SYN(flags))
 		  {
-			;//<#statements#>
+		    //TODO Set a timeout also	
+		    (*cs).state.SetState(SYN_RCVD); //we just received a SYN
 		  }
 	        }
 		case SYN_RCVD:
@@ -156,8 +167,14 @@ int main(int argc, char *argv[])
 		}
 		case LAST_ACK:
 		{
-			;
+		  if (IS_ACK(flags))
+		  {
+		    (*cs).state.SetState(CLOSED);
+		    //No need to send anything, just "CLOSE".
+		    //since this is the "last" ack	
+		  }
 		}
+		 break;
 		case FIN_WAIT2:
 		{
 			;
@@ -188,14 +205,21 @@ int main(int argc, char *argv[])
 
       //  Data from the Sockets layer above  //
       if (event.handle==sock) {
-	SockRequestResponse s;
+	//A SockRequestResponse
+	//contains a request type, a Connection , a Buffer containing data, 
+	//a byte count, and an error code.
+	SockRequestResponse s;//first handle unserialization
 	MinetReceive(sock,s);
 	cerr << "Received Socket Request:" << s << endl;
 	switch (s.type) {
 	case CONNECT: //TODO:active open to remote pp15
+	{
+	  ;
+	}
+	 break;
 	case ACCEPT:  //TODO:passive open from remote pp15
 	 { // ignored, send OK response
-	   SockRequestResponse repl;
+	   SockRequestResponse repl;// handle serialization
 	   repl.type=STATUS;
 	   repl.connection=s.connection;
 	// buffer is zero byte
@@ -241,7 +265,11 @@ int main(int argc, char *argv[])
 	 break;
 	case FORWARD:
 	 {
-	   return 0;//ignore this message, resurn 0 STATUS
+	   //ignore this message, resurn error STATUS
+	   SockRequestResponse repl;
+	   repl.type = STATUS;
+	   repl.error = EWHAT;
+	   MinetSend(sock,repl);
          }
 	 break;
         case CLOSE:
@@ -261,7 +289,7 @@ int main(int argc, char *argv[])
 		actually reflects the number of bytes read from the WRITE. The TCP module
 		will resend the remaining bytes at some point in the future.*/
 	 }
-	default:
+	default: //treat the status as error
 	 {
 	   SockRequestResponse repl;
 	   repl.type = STATUS;
@@ -273,4 +301,53 @@ int main(int argc, char *argv[])
     }//end of "else"
   }//end of "while" loop
   return 0;
+}
+
+void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal)
+{
+
+  unsigned char flags = 0;
+
+  int packetLen = dataLen + TCP_HEADER_BASE_LENGTH + IP_HEADER_BASE_LENGTH;
+  IPHeader iph;
+  TCPHeader tcph;
+  IPAddress src = constate.connection.src;
+  IPAddress dest = constate.connection.dest;
+
+  //create the IP packet
+  iph.SetSourceIP(src);
+  iph.SetDestIP(dest);
+  iph.SetTotalLength(packetLen);
+  iph.SetProtocol(IP_PROTO_TCP);
+  
+  packet.PushFrontHeader(iph);
+  
+  switch (signal){
+  case SIG_SYN_ACK:
+   {	
+     SET_SYN(flags);
+     SET_ACK(flags);
+   }
+   break;
+  
+  /*case SIG_RST:
+    SET_RST(flags);
+  break;*/
+  
+  case SIG_ACK:
+    SET_ACK(flags);
+  break;
+ 
+  case SIG_SYN:
+    SET_SYN(flags);
+ 
+  case SIG_FIN:
+    SET_FIN(flags);
+  break;
+                                                            
+  default:
+  break;
+  }//TODO, figure out where to put this flag info(ipheader or tcpheader)
+  
+  packet.PushBackHeader(tcph);//
 }
