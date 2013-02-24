@@ -10,7 +10,8 @@
 #include <fcntl.h>
 #include <errno.h>
 
-
+#include <ctime>
+#include <cstdlib>
 #include <iostream>
 
 #include "Minet.h"
@@ -23,8 +24,9 @@ using std::cerr;
 using std::string;
 
 //Prototype
-void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal);
-
+void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal, unsigned int seq, unsigned int ack);
+void testPacket(Packet &packet);//test use only
+unsigned int generateISN(void);
 //My signal representation for createPacket();
 const int SIG_SYN_ACK = 0;
 const int SIG_ACK = 1;
@@ -100,7 +102,7 @@ int main(int argc, char *argv[])
 	tcph.GetAckNum(ackNum);
 	tcph.GetFlags(flags);//now we know what we need to do
 	tcph.GetWinSize(windowSize);
-	//cerr << "TCP Packet: IP Header is "<<ipl<<" and "; //TEST
+	//cerr << "TCP Packet: IP Header is "<<iph<<" and "; //TEST
 	//cerr << "TCP Header is "<<tcph << " and ";  //TEST
 	
 	unsigned short len;
@@ -112,7 +114,7 @@ int main(int argc, char *argv[])
           iph.GetTotalLength(len);
           iph.GetHeaderLength(iph_len);
           tcph.GetHeaderLen(tcph_len);
-          len  = len - (iph_len + tcph_len);
+          len  = len - (iph_len + tcph_len);//data length
 	  Buffer &data = p.GetPayload().ExtractFront(len);
 	  
 	  //Now handle connection state
@@ -127,16 +129,29 @@ int main(int argc, char *argv[])
 
 		case LISTEN:
 		{
-		  if (IS_SYN(flags))
-		  {
-		    //TODO Set a timeout also	
-		    (*cs).state.SetState(SYN_RCVD); //we just received a SYN
+		  if (IS_SYN(flags)){
+		    createPacket(p, connState, 0, 0,seqNum,ackNum+1);//send SYN&ACK
+		    //TODO Set a timeout also
+		    MinetSend(sock,p);	
+		    (*cs).state.SetState(SYN_RCVD); //we just received a SYN, change state
 		  }
+		  else
+		   ;
 	        }
+		 break;
+
 		case SYN_RCVD:
 		{
-			;
+		  if(IS_ACK(flags)){
+		   (*cs).state.SetState(ESTABLISHED);
+		  } 
+		  else if (IS_FIN(flags)) {
+		    //send ACK
+		   (*cs).state.SetState(FIN_WAIT1);
+		  }
+		  
 		}
+		 break;
 		case SYN_SENT:
 		{
 			;
@@ -161,10 +176,14 @@ int main(int argc, char *argv[])
 		{
 			;
 		}
+
 		case CLOSING:
 		{
-			;
+		  if (IS_FIN(flags))
+		   ;
 		}
+		 break;
+
 		case LAST_ACK:
 		{
 		  if (IS_ACK(flags))
@@ -303,7 +322,7 @@ int main(int argc, char *argv[])
   return 0;
 }
 
-void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal)
+void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal, unsigned int seq, unsigned int ack)
 {
 
   unsigned char flags = 0;
@@ -347,7 +366,36 @@ void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, 
                                                             
   default:
   break;
-  }//TODO, figure out where to put this flag info(ipheader or tcpheader)
-  
-  packet.PushBackHeader(tcph);//
+  }
+  //create the TCP header
+  tcph.SetSourcePort(constate.connection.srcport,packet);
+  tcph.SetDestPort(constate.connection.destport,packet);
+  tcph.SetFlags(flags,packet);
+  tcph.SetSeqNum(seq,packet);
+  tcph.SetAckNum(ack,packet);
+  packet.PushBackHeader(tcph);
+}
+
+/*
+void testPacket(Packet &packet)
+{
+  unsigned char flags = 0;
+
+  int packetLen = TCP_HEADER_BASE_LENGTH + IP_HEADER_BASE_LENGTH;
+  IPHeader iph;
+  TCPHeader tcph;
+  IPAddress src = constate.connection.src;
+  IPAddress dest = constate.connection.dest;
+
+}*/
+
+unsigned int generateISN()
+{
+  srand((unsigned)time(0));
+  unsigned int random;
+  unsigned int lowest=100;
+  unsigned int highest=1000;
+  unsigned int range=(highest-lowest)+1;
+  random = lowest+(unsigned int)(range*rand()/(RAND_MAX + 1.0));
+  return random;
 }
