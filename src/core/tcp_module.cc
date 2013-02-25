@@ -26,6 +26,7 @@ using std::string;
 //Prototype
 void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal, unsigned int seq, unsigned int ack);
 void testPacket(Packet &packet);//test use only
+void hardCodeListen(ConnectionToStateMapping<TCPState>& constate, unsigned short srcport, Time timeout);
 unsigned int generateISN(void);
 //My signal representation for createPacket();
 const int SIG_SYN_ACK = 0;
@@ -130,7 +131,7 @@ int main(int argc, char *argv[])
 		case LISTEN:
 		{
 		  if (IS_SYN(flags)){
-		    createPacket(p, connState, 0, 0,seqNum,ackNum+1);//send SYN&ACK
+		    createPacket(p, connState, 0, SIG_SYN_ACK, generateISN(),seqNum+1);//send SYN&ACK
 		    //TODO Set a timeout also
 		    MinetSend(sock,p);	
 		    (*cs).state.SetState(SYN_RCVD); //we just received a SYN, change state
@@ -233,7 +234,8 @@ int main(int argc, char *argv[])
 	switch (s.type) {
 	case CONNECT: //TODO:active open to remote pp15
 	{
-	  ;
+	  //SockRequestResponse repl;
+	  //repl.type=STATUS;
 	}
 	 break;
 	case ACCEPT:  //TODO:passive open from remote pp15
