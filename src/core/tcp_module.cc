@@ -24,15 +24,14 @@ using std::cerr;
 using std::string;
 
 //Prototype
-void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal, unsigned int seq, unsigned int ack);
+void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal);// unsigned int seq, unsigned int ack);
 void testPacket(Packet &packet);//test use only
 void hardCodeListen(ConnectionToStateMapping<TCPState>& constate, unsigned short srcport, Time timeout);
 unsigned int generateISN(void);
 //My signal representation for createPacket();
 const int SIG_SYN_ACK = 0;
 const int SIG_ACK = 1;
-const int SIG_SYN = 2;
-const int SIG_FIN = 3;
+const int SIG_FIN = 2;
 
 int main(int argc, char *argv[])
 {
@@ -67,12 +66,12 @@ int main(int argc, char *argv[])
     // if we received an unexpected type of event, print error
     if (event.eventtype!=MinetEvent::Dataflow
 	|| event.direction!=MinetEvent::IN) {
-      MinetSendToMonitor(MinetMonitoringEvent("Unknown event ignored."));
+      MinetSendToMonitor(MinetMonitoringEvent("[Unknown event] Ignored!"));
     // if we received a valid event from Minet, do processing
     } else {
       if (event.handle==mux) {
 	Packet p;
-	bool checkSumOK;
+	//bool checkSumOK;
 
 	unsigned int ackNum;
 	unsigned int seqNum;
@@ -87,11 +86,16 @@ int main(int argc, char *argv[])
 	//Find TCP and IP header
 	IPHeader iph=p.FindHeader(Headers::IPHeader);
 	TCPHeader tcph=p.FindHeader(Headers::TCPHeader);
-        checkSumOK=tcph.IsCorrectChecksum(p);
-        //cerr << "Checksum is " << (checkSumOK ? "VALID" : "INVALID");//TEST
+	if( !iph.IsChecksumCorrect() || !tcph.IsCorrectChecksum(p) )
+    	{
+          std::cerr << "[Bad checksum] Packet dropped!" << std::endl;
+          return -1;
+    	}
+
+        //checkSumOK=tcph.IsCorrectChecksum(p);
         Connection c;
 
-	//Flip around, change source to "this machine", source is the machine we receive packet from
+	//Flip around, change source to "this machine", destination is the machine we receive packet from
 	//Handle IP header
 	iph.GetDestIP(c.src);
 	iph.GetSourceIP(c.dest);
@@ -109,7 +113,7 @@ int main(int argc, char *argv[])
 	unsigned short len;
 	unsigned char iph_len;
 	unsigned char tcph_len;
-	checkSumOK = tcph.IsCorrectChecksum(p);
+	//checkSumOK = tcph.IsCorrectChecksum(p);
         ConnectionList<TCPState>::iterator cs = clist.FindMatching(c);
 	if (cs!=clist.end()) {
           iph.GetTotalLength(len);
@@ -130,40 +134,33 @@ int main(int argc, char *argv[])
 
 		case LISTEN:
 		{
-		    //void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal, unsigned int seq, unsigned int ack)
-
 		    // Passive open refers to the situation when you receive a SYN in LISTEN state.
 		    // You need to send a SYN-ACK and set a timeout for the expected ACK from the remote side)
-
 		    /* --> How to do the timeout
 		    While(MinetGetNextEvent(event, timeout) == 0 {
-                if(event.eventtype == MinetEvent::Timeout) {
-                    cerr << "Handle timer stuff here!"
-                }
-            }*/
+                	if(event.eventtype == MinetEvent::Timeout) {
+                    	cerr << "Handle timer stuff here!"
+               		 }
+            	   }*/
+		/*
+            	Server’s ISN (generated pseudo-randomly)
+            	Request Number is Client ISN+1
+            	Maximum Receive Window for server.
+           	Optionally (but usually) MSS
+            	No payload! (Only TCP headers)*/
 
-            /*
-            Server’s ISN (generated pseudo-randomly)
-            Request Number is Client ISN+1
-            Maximum Receive Window for server.
-            Optionally (but usually) MSS
-            No payload! (Only TCP headers)*/
-
-            //You should create a new connection state when you receive an ACCEPT call from a socket, that's how you create a tcp socket for the listener, notably something UDP doesn't do.
-
+            	//You should create a new connection state when you receive an ACCEPT call from a socket, 
+            	//that's how you create a tcp socket for the listener, notably something UDP doesn't do.
 		  if (IS_SYN(flags)){
-<<<<<<< HEAD
-		    createPacket(p, connState, 0, SIG_SYN_ACK, generateISN(),seqNum+1);//send SYN&ACK
-=======
-		    createPacket(p, connState, 0, SIG_SYN_ACK,seqNum,ackNum+1);//send SYN&ACK
->>>>>>> 1f7c2d87a2f106d88e79a762fac3fb2a65f39611
+		    Packet HandShake2;
+		    createPacket(HandShake2, connState, 0, SIG_SYN_ACK);
 		    //TODO Set a timeout also
-		    MinetSend(sock,p);
+		    MinetSend(sock,HandShake2);
+		    cerr<<"[SYN_ACK Sent]"<<endl;
+	            (*cs).state.last_sent++;
 		    (*cs).state.SetState(SYN_RCVD); //we just received a SYN, change state
 		  }
-		  else
-		   ;
-        }
+        	}
 		 break;
 
 		case SYN_RCVD:
@@ -180,7 +177,14 @@ int main(int argc, char *argv[])
 		 break;
 		case SYN_SENT:
 		{
-			;
+		   if (IS_SYN(flags)&&IS_ACK(flags)){
+		    Packet HandShake3;
+		    createPacket(HandShake3, connState, 0, SIG_ACK);
+                    MinetSend(sock,HandShake3);
+		    cerr<<"[ACK Sent]"<<endl;
+                    (*cs).state.last_sent++;
+                    (*cs).state.SetState(SYN_RCVD); 
+		   } 
 		}
 		case SYN_SENT1:
 		{
@@ -188,7 +192,9 @@ int main(int argc, char *argv[])
 		}
 		case ESTABLISHED:
 		{
-			;
+		  if(IS_ACK(flags)){
+		   ;
+		  }
 		}
 		case SEND_DATA:
 		{
@@ -229,15 +235,15 @@ int main(int argc, char *argv[])
 			;
 		}
 	  }
-	  SockRequestResponse write(WRITE,
+	  /*SockRequestResponse write(WRITE,
 				    (*cs).connection,
 				     data,
 				     len,
-				     EOK);
-	  if (!checkSumOK) {
-	    MinetSendToMonitor(MinetMonitoringEvent("forwarding packet to sock even though checksum failed"));
-	   }
-	  MinetSend(sock,write);
+				     EOK);*/
+	  //else if (!checkSumOK) {
+	  //  MinetSendToMonitor(MinetMonitoringEvent("forwarding packet to sock even though checksum failed"));
+	  //  MinetSend(sock,write);
+	  // }
 	} else {
 	  MinetSendToMonitor(MinetMonitoringEvent("Unknown port, sending ICMP error message"));
 	  IPAddress source;
@@ -257,10 +263,15 @@ int main(int argc, char *argv[])
 	MinetReceive(sock,s);
 	cerr << "Received Socket Request:" << s << endl;
 	switch (s.type) {
-	case CONNECT: //TODO:active open to remote pp15
+	case CONNECT: //TODO:active open to remote, client
 	{
-	  //SockRequestResponse repl;
-	  //repl.type=STATUS;
+	  //SockRequestResponse req;
+	  //req.type=CONNECT;
+	  //req.bytes =0;
+	  //req.error=EOK;
+	  //Packet pConn;
+	  //createPacket(pConn, connState, 0, SIG_SYN, generateISN(),0);//set SYN =1, send seq only
+	  //MinetSend(mux,pConn);
 	}
 	 break;
 	case ACCEPT:  //TODO:passive open from remote pp15
@@ -349,7 +360,7 @@ int main(int argc, char *argv[])
   return 0;
 }
 
-void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal, unsigned int seq, unsigned int ack)
+void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal)//, unsigned int seq, unsigned int ack)
 {
 
   unsigned char flags = 0;
@@ -373,6 +384,9 @@ void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, 
    {
      SET_SYN(flags);
      SET_ACK(flags);
+     tcph.SetSeqNum(generateISN(), packet);
+     tcph.SetAckNum(0, packet);
+     tcph.SetWinSize(constate.state.GetN(),packet);
    }
    break;
 
@@ -381,11 +395,13 @@ void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, 
   break;*/
 
   case SIG_ACK:
+   {
     SET_ACK(flags);
+    tcph.SetSeqNum(constate.state.last_sent+1, packet);
+    tcph.SetAckNum(constate.state.GetLastRecvd()+1, packet);
+    tcph.SetWinSize(constate.state.GetN(),packet);
+   }
   break;
-
-  case SIG_SYN:
-    SET_SYN(flags);
 
   case SIG_FIN:
     SET_FIN(flags);
@@ -394,28 +410,15 @@ void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, 
   default:
   break;
   }
-  //create the TCP header
+  //Handle TCP header
   tcph.SetSourcePort(constate.connection.srcport,packet);
   tcph.SetDestPort(constate.connection.destport,packet);
+  tcph.SetHeaderLen(TCP_HEADER_BASE_LENGTH,packet);
   tcph.SetFlags(flags,packet);
-  tcph.SetSeqNum(seq,packet);
-  tcph.SetAckNum(ack,packet);
   packet.PushBackHeader(tcph);
 }
 
-/*
-void testPacket(Packet &packet)
-{
-  unsigned char flags = 0;
-
-  int packetLen = TCP_HEADER_BASE_LENGTH + IP_HEADER_BASE_LENGTH;
-  IPHeader iph;
-  TCPHeader tcph;
-  IPAddress src = constate.connection.src;
-  IPAddress dest = constate.connection.dest;
-
-}*/
-
+  
 unsigned int generateISN()
 {
   srand((unsigned)time(0));
