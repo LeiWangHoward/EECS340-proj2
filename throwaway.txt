@@ -1,0 +1,27 @@
+case LISTEN:
+		{
+		  if (IS_SYN(flags))
+		  {
+		    //TODO Set a timeout also
+		    (*cs).state.SetState(SYN_RCVD); //we just received a SYN
+
+		    // Passive open refers to the situation when you receive a SYN in LISTEN state.
+		    // You need to send a SYN-ACK and set a timeout for the expected ACK from the remote side)
+		    /*
+		    While(MinetGetNextEvent(event, timeout) == 0 {
+                if(event.eventtype == MinetEvent::Timeout) {
+                    cerr << "Handle timer stuff here!"
+                }
+            }*/
+
+            /*
+            Server’s ISN (generated pseudo-randomly)
+            Request Number is Client ISN+1
+            Maximum Receive Window for server.
+            Optionally (but usually) MSS
+            No payload! (Only TCP headers)*/
+
+            //You should create a new connection state when you receive an ACCEPT call from a socket, that's how you create a tcp socket for the listener, notably something UDP doesn't do.
+
+		  }
+        }

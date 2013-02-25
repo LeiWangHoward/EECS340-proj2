@@ -64,7 +64,7 @@ int main(int argc, char *argv[])
 
   while (MinetGetNextEvent(event)==0) {
     // if we received an unexpected type of event, print error
-    if (event.eventtype!=MinetEvent::Dataflow 
+    if (event.eventtype!=MinetEvent::Dataflow
 	|| event.direction!=MinetEvent::IN) {
       MinetSendToMonitor(MinetMonitoringEvent("Unknown event ignored."));
     // if we received a valid event from Minet, do processing
@@ -72,7 +72,7 @@ int main(int argc, char *argv[])
       if (event.handle==mux) {
 	Packet p;
 	bool checkSumOK;
-	
+
 	unsigned int ackNum;
 	unsigned int seqNum;
 	unsigned char flags;
@@ -87,9 +87,9 @@ int main(int argc, char *argv[])
 	IPHeader iph=p.FindHeader(Headers::IPHeader);
 	TCPHeader tcph=p.FindHeader(Headers::TCPHeader);
         checkSumOK=tcph.IsCorrectChecksum(p);
-        //cerr << "Checksum is " << (checkSumOK ? "VALID" : "INVALID");//TEST 
+        //cerr << "Checksum is " << (checkSumOK ? "VALID" : "INVALID");//TEST
         Connection c;
-	
+
 	//Flip around, change source to "this machine", source is the machine we receive packet from
 	//Handle IP header
 	iph.GetDestIP(c.src);
@@ -104,19 +104,19 @@ int main(int argc, char *argv[])
 	tcph.GetWinSize(windowSize);
 	//cerr << "TCP Packet: IP Header is "<<iph<<" and "; //TEST
 	//cerr << "TCP Header is "<<tcph << " and ";  //TEST
-	
+
 	unsigned short len;
 	unsigned char iph_len;
 	unsigned char tcph_len;
 	checkSumOK = tcph.IsCorrectChecksum(p);
-        ConnectionList<TCPState>::iterator cs = clist.FindMatching(c); 
+        ConnectionList<TCPState>::iterator cs = clist.FindMatching(c);
 	if (cs!=clist.end()) {
           iph.GetTotalLength(len);
           iph.GetHeaderLength(iph_len);
           tcph.GetHeaderLen(tcph_len);
           len  = len - (iph_len + tcph_len);//data length
 	  Buffer &data = p.GetPayload().ExtractFront(len);
-	  
+
 	  //Now handle connection state
 	  ConnectionToStateMapping<TCPState> &connState = *cs;
 	  unsigned int currentState = connState.state.GetState();
@@ -129,27 +129,48 @@ int main(int argc, char *argv[])
 
 		case LISTEN:
 		{
+		    //void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal, unsigned int seq, unsigned int ack)
+
+		    // Passive open refers to the situation when you receive a SYN in LISTEN state.
+		    // You need to send a SYN-ACK and set a timeout for the expected ACK from the remote side)
+
+		    /* --> How to do the timeout
+		    While(MinetGetNextEvent(event, timeout) == 0 {
+                if(event.eventtype == MinetEvent::Timeout) {
+                    cerr << "Handle timer stuff here!"
+                }
+            }*/
+
+            /*
+            Server’s ISN (generated pseudo-randomly)
+            Request Number is Client ISN+1
+            Maximum Receive Window for server.
+            Optionally (but usually) MSS
+            No payload! (Only TCP headers)*/
+
+            //You should create a new connection state when you receive an ACCEPT call from a socket, that's how you create a tcp socket for the listener, notably something UDP doesn't do.
+
 		  if (IS_SYN(flags)){
-		    createPacket(p, connState, 0, 0,seqNum,ackNum+1);//send SYN&ACK
+		    createPacket(p, connState, 0, SIG_SYN_ACK,seqNum,ackNum+1);//send SYN&ACK
 		    //TODO Set a timeout also
-		    MinetSend(sock,p);	
+		    MinetSend(sock,p);
 		    (*cs).state.SetState(SYN_RCVD); //we just received a SYN, change state
 		  }
 		  else
 		   ;
-	        }
+        }
 		 break;
 
 		case SYN_RCVD:
 		{
 		  if(IS_ACK(flags)){
 		   (*cs).state.SetState(ESTABLISHED);
-		  } 
+		  }
 		  else if (IS_FIN(flags)) {
 		    //send ACK
 		   (*cs).state.SetState(FIN_WAIT1);
 		  }
-		  
+
 		}
 		 break;
 		case SYN_SENT:
@@ -190,7 +211,7 @@ int main(int argc, char *argv[])
 		  {
 		    (*cs).state.SetState(CLOSED);
 		    //No need to send anything, just "CLOSE".
-		    //since this is the "last" ack	
+		    //since this is the "last" ack
 		  }
 		}
 		 break;
@@ -225,7 +246,7 @@ int main(int argc, char *argv[])
       //  Data from the Sockets layer above  //
       if (event.handle==sock) {
 	//A SockRequestResponse
-	//contains a request type, a Connection , a Buffer containing data, 
+	//contains a request type, a Connection , a Buffer containing data,
 	//a byte count, and an error code.
 	SockRequestResponse s;//first handle unserialization
 	MinetReceive(sock,s);
@@ -295,8 +316,8 @@ int main(int argc, char *argv[])
 	 {
 	   ;
 	   /*TODO:close connection. The connection represents the connection to match on
-		and all other fields are ignored. If there is a matching connection, 
-		this will close it. Otherwise it is an error. A STATUS with the same connection 
+		and all other fields are ignored. If there is a matching connection,
+		this will close it. Otherwise it is an error. A STATUS with the same connection
 		and an error code will be returned. STATUS: status update.*/
 	 }
 	 break;
@@ -314,7 +335,7 @@ int main(int argc, char *argv[])
 	   repl.type = STATUS;
 	   repl.error=EWHAT;
 	   MinetSend(sock,repl);
-	 }		
+	 }
         }//end of switch
      }//end of "if"
     }//end of "else"
@@ -338,32 +359,32 @@ void createPacket(Packet &packet, ConnectionToStateMapping<TCPState>& constate, 
   iph.SetDestIP(dest);
   iph.SetTotalLength(packetLen);
   iph.SetProtocol(IP_PROTO_TCP);
-  
+
   packet.PushFrontHeader(iph);
-  
+
   switch (signal){
   case SIG_SYN_ACK:
-   {	
+   {
      SET_SYN(flags);
      SET_ACK(flags);
    }
    break;
-  
+
   /*case SIG_RST:
     SET_RST(flags);
   break;*/
-  
+
   case SIG_ACK:
     SET_ACK(flags);
   break;
- 
+
   case SIG_SYN:
     SET_SYN(flags);
- 
+
   case SIG_FIN:
     SET_FIN(flags);
   break;
-                                                            
+
   default:
   break;
   }
