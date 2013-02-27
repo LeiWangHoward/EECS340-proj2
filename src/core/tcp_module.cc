@@ -35,7 +35,8 @@ unsigned int generateISN(void);
 //My signal representation for createPacket();
 const int SIG_SYN_ACK = 0;
 const int SIG_ACK = 1;
-const int SIG_FIN = 2;
+const int SIG_SYN = 2;
+const int SIG_FIN = 3;
 //Connection state representation for server&client
 enum StateMapping
 {
@@ -49,7 +50,6 @@ int main(int argc, char *argv[])
   MinetHandle mux, sock;//Multiplexor and Socket
 
   ConnectionList<TCPState> clist;		//Open connections
-  ConnectionList<TCPState> ctime_wait_list; 	//Time wait connections
   ConnectionList<TCPState> clisten_list;   	//Listening connections 
   MinetInit(MINET_TCP_MODULE);//initialize tcp module
 
@@ -153,7 +153,7 @@ int main(int argc, char *argv[])
 	Buffer &recvdata = p.GetPayload().ExtractFront(packetLen-ipHeaderLen-tcpHeaderLen);
 	
 	//Demultiplexing packet, first search open connection list
-        ConnectionList<TCPState>::iterator cs = clist.FindMatching(c);//if source matchs(server ip etc), then continue 
+        ConnectionList<TCPState>::iterator cs = clist.FindMatchingSource(c);//if source matchs(server ip etc), then continue 
 	if (cs!=clist.end()) {
 	  //Now handle connection state for open connection list
 	  ConnectionToStateMapping<TCPState> &connState = *cs;
@@ -169,18 +169,27 @@ int main(int argc, char *argv[])
 
 		case SYN_RCVD:
 		{
-		  if(IS_ACK(flags)){
-	           receivePacket(mux, sock,recvdata, flags, ackNum, seqNum, tcpLen, connState, c);
-		   EmptyWriteToApplication(sock,c);
-		   cerr<<"[Recieved ACK] Connection transitioned from SYN_RCVD to ESTABLISHED!"<<endl;
-		   connState.state.SetState(ESTABLISHED);
-		   state_map = OPEN_CONNECTION;
+		  cerr<<"Handle SYN_RCVD state"<<endl;
+		  if (connState.state.GetLastRecvd() == seqNum) {
+		   if(IS_ACK(flags)){
+	            receivePacket(mux, sock,recvdata, flags, ackNum, seqNum, tcpLen, connState, c);
+		    EmptyWriteToApplication(sock,c);
+		    cerr<<"[Recieved ACK] Connection transitioned from SYN_RCVD to ESTABLISHED!"<<endl;
+		    connState.state.SetState(ESTABLISHED);
+		    state_map = OPEN_CONNECTION;
+		   }
+		   else if(IS_RST(flags)){ //reset flag
+		    cerr<<"[Reset] Connection transitioned from SYN_RCVD to LISTEN"<<endl;
+		    connState.state.SetState(LISTEN);
+		    connState.bTmrActive = false;
+		   }
 		  }
 		}
 		 break;
 
 		case SYN_SENT:
 		{
+		   cerr<<"Handle SYN_SENT state"<<endl;
 		   if (IS_SYN(flags) && IS_ACK(flags)){
 		    //3rd HandShake
 		    sendPacket(mux, connState, 0, SIG_ACK);
@@ -287,11 +296,11 @@ int main(int argc, char *argv[])
 	} 
 	
 	//If search failed, search time wait connection list
-	cs = ctime_wait_list.FindMatching(c); 
+	/*cs = ctime_wait_list.FindMatching(c); 
 	if (cs!= ctime_wait_list.end())
 	{
 	  continue;//TODO:handle time wait connection process
-	}
+	}*/
 
 	//If search failed, go to listening connection
 	cs = clisten_list.FindMatchingSource(c);
@@ -303,6 +312,11 @@ int main(int argc, char *argv[])
           unsigned int currentState = connState.state.GetState();
           if (currentState == LISTEN)
 	  {
+	    //reset first
+	    connState.state.SetLastSent(0); 
+	    connState.state.SetLastRecvd(0);
+	    connState.state.SetLastAcked(0);
+
 	    if (IS_ACK(flags))
 	    {
 		;//TODO:RST
@@ -312,8 +326,11 @@ int main(int argc, char *argv[])
               cerr<<"[SYN received]"<<endl;
 
               TCPState newState(generateISN(), SYN_RCVD, 3); //generate a new state
-              newState.last_recvd = seqNum;
+	      //turn on timer
+	      //newState.bTmrActive = true;
 
+              newState.last_recvd = seqNum;
+	      newState.SetSendRwnd(windowSize);
               ConnectionToStateMapping<TCPState> newMapping(c, Time()+80, newState, false);
 
               //2nd handshake, from server to client
@@ -345,34 +362,59 @@ int main(int argc, char *argv[])
 	SockRequestResponse s;//first handle unserialization
 	MinetReceive(sock,s);
 	cerr << "Received Socket Request:" << s << endl;
+
+	ConnectionList<TCPState>::iterator cs = clist.FindMatching(s.connection);
+        if(cs == clist.end())
+          cs = clisten_list.FindMatching(s.connection);
+
 	switch (s.type) {
-	case CONNECT: //TODO:active open to remote, client
+	case CONNECT: //active open to remote, client
 	{
-	  //SockRequestResponse req;
-	  //req.type=CONNECT;
-	  //req.bytes =0;
-	  //req.error=EOK;
-	  //Packet pConn;
-	  //createPacket(pConn, connState, 0, SIG_SYN, generateISN(),0);//set SYN =1, send seq only
-	  //MinetSend(mux,pConn);
+	  cerr<<"Handle socket request state CONNECT"<<endl;
+	  unsigned int timeTries = 3; //try 3 times, default 
+
+	  TCPState newState = TCPState(generateISN(), SYN_SENT, timeTries);
+	  
+	  //Connection c = s.connection; 
+	  //ConnectionToStateMapping<TCPState> connState(c, Time()+80, newState, false);
+	  ConnectionToStateMapping<TCPState> connState;
+	  connState.connection = s.connection;
+	  connState.state = newState;
+	  connState.state.SetLastSent(connState.state.GetLastSent()+1);
+	 
+	  //for active open, send a SYN packet  
+	  sendPacket(mux, connState, 0, SIG_SYN);
+	  
+	  clist.push_front(connState);
+	  
+	  //send a status response
+	  SockRequestResponse repl;
+	  repl.type=STATUS;
+	  repl.bytes =0;
+	  repl.error=EOK;
+	  MinetSend(sock,repl);
 	}
 	 break;
-	case ACCEPT:  //TODO:passive open from remote,server listening
-	 { // ignored, send OK response
-	   SockRequestResponse repl;// handle serialization
-	   repl.type=STATUS;
-	   repl.connection=s.connection;
-	   // buffer is zero byte
-	   repl.bytes=0;
-	   repl.error=EOK;
-	   MinetSend(sock,repl);
-	   TCPState newState(generateISN(), LISTEN, 3); //generate a new state
-	   Connection c = s.connection;
-           newState.last_recvd = 0;//TODO
-           ConnectionToStateMapping<TCPState> newMapping(c, Time()+80, newState, false);
-           //1st handshake, from client to server
-           //add the new mapping to open connection list
-           clisten_list.push_back(newMapping);
+	case ACCEPT:  //passive open from remote,server listening
+	 { 
+	   cerr<<"Handle socket request state ACCEPT";
+	   if ((*cs).state.GetState() != FIN_WAIT1)
+	   {
+	     unsigned int timeTries = 3;
+	     // passive open, new ISN for server side
+	     TCPState newState = TCPState(generateISN(), LISTEN, timeTries);
+	    
+	     ConnectionToStateMapping<TCPState> connState(s.connection, Time()+80, newState, false);
+	     clisten_list.push_front(connState); 
+	     
+	     SockRequestResponse repl;// handle serialization
+	     repl.type=STATUS;
+	     repl.connection=s.connection;
+	     // buffer is zero byte
+	     repl.bytes=0;
+	     repl.error=EOK;
+	     MinetSend(sock,repl);
+	    }
 	 }
 	 break;
 	// case SockRequestResponse::WRITE:
@@ -416,7 +458,7 @@ int main(int argc, char *argv[])
 	   //ignore this message, resurn error STATUS
 	   SockRequestResponse repl;
 	   repl.type = STATUS;
-	   repl.error = EWHAT;
+	   repl.error = EOK;
 	   MinetSend(sock,repl);
          }
 	 break;
@@ -503,7 +545,14 @@ void sendPacket(const MinetHandle &mux, ConnectionToStateMapping<TCPState>& cons
     tcph.SetWinSize(constate.state.GetN(),packet);
    }
   break;
-
+  
+  case SIG_SYN:
+   {
+    SET_SYN(flags);
+    tcph.SetSeqNum(0, packet);
+    tcph.SetAckNum(0, packet);
+    tcph.SetWinSize(constate.state.GetN(),packet);
+   }
   case SIG_FIN:
     SET_FIN(flags);
   break;
