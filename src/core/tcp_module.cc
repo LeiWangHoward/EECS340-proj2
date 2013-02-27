@@ -72,7 +72,7 @@ int main(int argc, char *argv[])
 
   MinetEvent event;
 
-  cout<<"TCP start working now"<<endl;//test
+  cerr<<"TCP start working now"<<endl;//test
 
   while (MinetGetNextEvent(event)==0) {
     // if we received an unexpected type of event, print error
@@ -81,6 +81,7 @@ int main(int argc, char *argv[])
       MinetSendToMonitor(MinetMonitoringEvent("[Unknown event] Ignored!"));
     // if we received a valid event from Minet, do processing
     } else {
+      cerr<<"Now start handle mux or socket"<<endl;
       if (event.handle==mux) {
 	Packet p;
         unsigned short packetLen;
@@ -96,10 +97,10 @@ int main(int argc, char *argv[])
 
         //receive packet
 	MinetReceive(mux,p);
-
-	/*estimate tcp header length
-	unsigned tcpHeaderlen=TCPHeader::EstimateTCPHeaderLength(p);
-	p.ExtractHeaderFromPayload<TCPHeader>(tcphlen);*/
+        cerr<<"Package received from below!"<<endl;
+	//estimate tcp header length
+	unsigned tcpHeaderlenEst=TCPHeader::EstimateTCPHeaderLength(p);
+	p.ExtractHeaderFromPayload<TCPHeader>(tcpHeaderlenEst);
 
 	//Find IP header and judge if we need to drop packet 
 	IPHeader ipHeader=p.FindHeader(Headers::IPHeader);
@@ -117,7 +118,7 @@ int main(int argc, char *argv[])
 
 	if( !ipHeader.IsChecksumCorrect() || !tcpHeader.IsCorrectChecksum(p) )
 	{
-	  std::cerr << "[Bad checksum] Packet dropped!" << std::endl;
+	  cerr << "[Bad checksum] Packet dropped!" << endl;
 	  return -1;
 	}
 
@@ -139,8 +140,8 @@ int main(int argc, char *argv[])
 	tcpHeaderLen *= 4;
 
 	tcpLen = packetLen - ipHeaderLen - tcpHeaderLen + ( ( IS_FIN(flags) || IS_SYN(flags) ) ? 1 : 0 );
-	//cerr << "TCP Packet: IP Header is "<<iph<<" and "; //TEST
-	//cerr << "TCP Header is "<<tcph << " and ";  //TEST
+	cerr << "TCP Packet: IP Header is "<<ipHeader<<endl; //TEST
+	cerr << "TCP Header is "<<tcpHeader <<endl;  //TEST
 	
 	//Flip around, change source to "this machine", destination is the machine we receive packet from
 	//Handle IP header
@@ -152,16 +153,17 @@ int main(int argc, char *argv[])
 	Buffer &recvdata = p.GetPayload().ExtractFront(packetLen-ipHeaderLen-tcpHeaderLen);
 	
 	//Demultiplexing packet, first search open connection list
-        ConnectionList<TCPState>::iterator cs = clist.FindMatching(c);
+        ConnectionList<TCPState>::iterator cs = clist.FindMatching(c);//if source matchs(server ip etc), then continue 
 	if (cs!=clist.end()) {
 	  //Now handle connection state for open connection list
 	  ConnectionToStateMapping<TCPState> &connState = *cs;
 	  unsigned int currentState = connState.state.GetState();
 	  StateMapping state_map = CLOSE_CONNECTION; 
+	  cerr<<"Current state number: "<<currentState;
 	  switch (currentState) {
 		case CLOSED:
 		{
-		  cout<< "Receiver wait to be open"<<endl;
+		  cerr<< "Receiver wait to be open"<<endl;
 		}
 		 break;
 
@@ -281,19 +283,22 @@ int main(int argc, char *argv[])
 				     data,
 				     len,
 				     EOK);*/
+	 continue;
 	} 
 	
 	//If search failed, search time wait connection list
 	cs = ctime_wait_list.FindMatching(c); 
 	if (cs!= ctime_wait_list.end())
 	{
-	  ;//handle time wait connection process
+	  continue;//TODO:handle time wait connection process
 	}
 
 	//If search failed, go to listening connection
-	cs = clisten_list.FindMatching(c);
+	cs = clisten_list.FindMatchingSource(c);
+        //cs = clisten_list.FindMatching(c);
 	if(cs!= clisten_list.end())
 	{
+	  cerr<<"Now we handle listen!"<<endl;
 	  ConnectionToStateMapping<TCPState> &connState = *cs;
           unsigned int currentState = connState.state.GetState();
           if (currentState == LISTEN)
@@ -319,16 +324,17 @@ int main(int argc, char *argv[])
               //connState.state.SetState(SYN_RCVD); //we just received a SYN, change state
             }
 	  }
+	  continue;
 	}
-	else
-	{
+	//else
+	//{
 	  MinetSendToMonitor(MinetMonitoringEvent("Unknown port, sending ICMP error message"));
 	  IPAddress source;
 	  ipHeader.GetSourceIP(source);
 	  ICMPPacket error(source,DESTINATION_UNREACHABLE,PORT_UNREACHABLE,p);
 	  MinetSendToMonitor(MinetMonitoringEvent("ICMP error message has been sent to host"));
 	  MinetSend(mux, error);
-	}
+	//}
       }
 
       //  Data from the Sockets layer above  //
@@ -356,17 +362,24 @@ int main(int argc, char *argv[])
 	   SockRequestResponse repl;// handle serialization
 	   repl.type=STATUS;
 	   repl.connection=s.connection;
-	// buffer is zero byte
+	   // buffer is zero byte
 	   repl.bytes=0;
 	   repl.error=EOK;
 	   MinetSend(sock,repl);
+	   TCPState newState(generateISN(), LISTEN, 3); //generate a new state
+	   Connection c = s.connection;
+           newState.last_recvd = 0;//TODO
+           ConnectionToStateMapping<TCPState> newMapping(c, Time()+80, newState, false);
+           //1st handshake, from client to server
+           //add the new mapping to open connection list
+           clisten_list.push_back(newMapping);
 	 }
 	 break;
 	// case SockRequestResponse::WRITE:
 	case WRITE:
 	 {
 	//TODO: connection refer to previous CONNECT and ACCEPT pp15
-	   unsigned bytes;//unsigned bytes = MIN_MACRO(TCP_MAX_DATA, s.data.GetSize()); TODO
+	   unsigned bytes=s.data.GetSize();
 	    // create the payload of the packet
 	   Packet p(s.data.ExtractFront(bytes));
 	    // Make the IP header first since we need it to do the tcp checksum
@@ -395,6 +408,7 @@ int main(int argc, char *argv[])
 	   repl.error=EOK;
 	   MinetSend(sock,repl);
 	//TODO: write generate multiple segments instead of only one (compared with UDP)
+	
 	 }
 	 break;
 	case FORWARD:
