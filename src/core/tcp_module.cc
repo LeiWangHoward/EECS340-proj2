@@ -17,6 +17,7 @@
 #include "Minet.h"
 #include "tcpstate.h"
 #include "tcp.h"
+#include "sockint.h"
 
 using std::cout;
 using std::endl;
@@ -85,6 +86,7 @@ int main(int argc, char *argv[])
       if (event.handle==mux) {
 	Packet p;
         unsigned short packetLen;
+	unsigned short segmentLen; //segment length (actual data + tcp header)
 	unsigned short tcpLen;
         unsigned char ipHeaderLen;
         unsigned char tcpHeaderLen;
@@ -140,8 +142,9 @@ int main(int argc, char *argv[])
 	tcpHeaderLen *= 4;
 
 	tcpLen = packetLen - ipHeaderLen - tcpHeaderLen + ( ( IS_FIN(flags) || IS_SYN(flags) ) ? 1 : 0 );
-	cerr << "TCP Packet: IP Header is "<<ipHeader<<endl; //TEST
-	cerr << "TCP Header is "<<tcpHeader <<endl;  //TEST
+	segmentLen = packetLen - ipHeaderLen;
+	//cerr << "TCP Packet: IP Header is "<<ipHeader<<endl; //TEST
+	//cerr << "TCP Header is "<<tcpHeader <<endl;  //TEST
 	
 	//Flip around, change source to "this machine", destination is the machine we receive packet from
 	//Handle IP header
@@ -150,20 +153,86 @@ int main(int argc, char *argv[])
 	ipHeader.GetProtocol(c.protocol);
 	tcpHeader.GetDestPort(c.srcport);
 	tcpHeader.GetSourcePort(c.destport);
-	Buffer &recvdata = p.GetPayload().ExtractFront(packetLen-ipHeaderLen-tcpHeaderLen);
-	
+	Buffer &recvdata = p.GetPayload().ExtractFront(segmentLen-tcpHeaderLen);
+
+	cerr<<"Now we start searching connectionlist!"<<endl;	
 	//Demultiplexing packet, first search open connection list
-        ConnectionList<TCPState>::iterator cs = clist.FindMatchingSource(c);//if source matchs(server ip etc), then continue 
+        ConnectionList<TCPState>::iterator cs = clist.FindMatching(c);//if source matchs(server ip etc), then continue
+	//server first bind to and listen at a port if receive SYN only
+	if(IS_SYN(flags)&&!IS_ACK(flags))
+	{
+          Connection listen;
+	  listen.src = MyIPAddr;
+	  listen.srcport = c.srcport;
+	  listen.dest = IP_ADDRESS_LO; //0.0.0.0
+	  listen.protocol = IP_PROTO_TCP;
+	 
+	  TCPState newState(generateISN(), LISTEN, 3);
+	  ConnectionToStateMapping<TCPState> newMapping(listen, Time()+80, newState, false);
+	  //newMapping.state.SetLastRecvd(seqNum);
+	  clist.push_front(newMapping);
+	  cerr<<"[SYN RCVD]We bind a port to listen!"<<endl;
+	  if(cs->state.GetState() == LISTEN)
+	  {
+	    cerr<<"Now we handle listen!"<<endl;
+	    TCPState newState(generateISN(), SYN_RCVD, 3);
+	    newState.last_recvd = seqNum;
+            newState.SetSendRwnd(windowSize);
+            ConnectionToStateMapping<TCPState> newMapping(c, Time()+80, newState, false);
+	    //2nd handshake
+	    sendPacket(mux, newMapping, 0, SIG_SYN_ACK);
+	    cerr<<"[SYN_ACK sent]"<<endl;
+	    clist.push_back(newMapping);
+	  }    
+	}
+	
+	//if(cs == clist.end())
+	//cerr<<"connection not found!"<<endl; 
 	if (cs!=clist.end()) {
+	  cerr<<"Now start to working on mux states"<<endl;
 	  //Now handle connection state for open connection list
 	  ConnectionToStateMapping<TCPState> &connState = *cs;
 	  unsigned int currentState = connState.state.GetState();
-	  StateMapping state_map = CLOSE_CONNECTION; 
-	  cerr<<"Current state number: "<<currentState;
+	  //StateMapping state_map = CLOSE_CONNECTION;
+	  connState.state.rwnd = windowSize; 
+	  //cerr<<"Current state number: "<<currentState;
 	  switch (currentState) {
 		case CLOSED:
 		{
 		  cerr<< "Receiver wait to be open"<<endl;
+		}
+		 break;
+		
+		case LISTEN:
+		{
+		  cerr<<"Now we handle listen!"<<endl;
+            		//reset first
+	    	  connState.state.SetLastSent(0); 
+	    	  connState.state.SetLastRecvd(0);
+	    	  connState.state.SetLastAcked(0);
+
+            		if (IS_ACK(flags))
+	    		{
+	     		 //TODO: RST
+            		}
+	    	  	else if (IS_SYN(flags))
+	    	  	{
+	      		 cerr<<"[SYN received]"<<endl;
+	      		 connState.state.SetState(SYN_RCVD);
+	      		 connState.connection =c; 
+	      
+	      		 //Handle timer
+	      		 //connState.bTmrActive = true;
+	      		 //connState.timeout = time()+80;
+	      		 connState.state.SetLastRecvd(seqNum);
+	      		 connState.state.SetSendRwnd(windowSize);  //sender window size 
+	      		 // "2nd" handshake, from server to client
+	      		 sendPacket(mux, connState, 0, SIG_SYN_ACK);
+	      		 cerr<<"[SYN_ACK Sent]"<<endl;
+	      		 //Update last sent
+	      		 connState.state.SetLastSent(connState.state.GetLastSent()+1);
+	      		 cerr<<"[LastSent: "<<connState.state.GetLastSent()<<"]"<<endl;
+			}
 		}
 		 break;
 
@@ -172,11 +241,11 @@ int main(int argc, char *argv[])
 		  cerr<<"Handle SYN_RCVD state"<<endl;
 		  if (connState.state.GetLastRecvd() == seqNum) {
 		   if(IS_ACK(flags)){
-	            receivePacket(mux, sock,recvdata, flags, ackNum, seqNum, tcpLen, connState, c);
+	            //receivePacket(mux, sock,recvdata, flags, ackNum, seqNum, tcpLen, connState, c);
 		    EmptyWriteToApplication(sock,c);
 		    cerr<<"[Recieved ACK] Connection transitioned from SYN_RCVD to ESTABLISHED!"<<endl;
 		    connState.state.SetState(ESTABLISHED);
-		    state_map = OPEN_CONNECTION;
+		    //state_map = OPEN_CONNECTION;
 		   }
 		   else if(IS_RST(flags)){ //reset flag
 		    cerr<<"[Reset] Connection transitioned from SYN_RCVD to LISTEN"<<endl;
@@ -197,7 +266,7 @@ int main(int argc, char *argv[])
 		    EmptyWriteToApplication(sock,c);
 		    cerr<<"[Recieved SYN_ACK] Connection transitioned from SYN_SENT to ESTABLISHED!"<<endl;
                     connState.state.SetState(ESTABLISHED); 
-		    state_map = OPEN_CONNECTION;
+		    //state_map = OPEN_CONNECTION;
 		   } 
 		}
 		 break;
@@ -205,7 +274,7 @@ int main(int argc, char *argv[])
 		case CLOSE_WAIT:
 		{
 		  receivePacket(mux, sock,recvdata, flags, ackNum, seqNum, tcpLen, connState, c);//TODO: ignore data
-		  state_map = OPEN_CONNECTION;
+		  //state_map = OPEN_CONNECTION;
 		}
 
 		case SYN_SENT1:
@@ -217,7 +286,7 @@ int main(int argc, char *argv[])
 		case ESTABLISHED:
 		{
 		  receivePacket(mux, sock,recvdata, flags, ackNum, seqNum, tcpLen, connState, c);
-		  state_map = OPEN_CONNECTION;
+		  //state_map = OPEN_CONNECTION;
 		  if(IS_FIN(flags))
 		  {
 		    sendPacket(mux, connState, 0, SIG_ACK);
@@ -259,7 +328,7 @@ int main(int argc, char *argv[])
 		  if (IS_ACK(flags)&&connState.state.last_recvd)
 		  {
 		    connState.state.SetState(CLOSED);
-		    state_map=CLOSE_CONNECTION;
+		    //state_map=CLOSE_CONNECTION;
 		    cerr<<"[Recieved ACK] Connection transitioned from LAST_ACK to CLOSED"<<endl;
 		    //No need to send anything, just "CLOSE".
 		    //since this is the "last" ack
@@ -271,8 +340,9 @@ int main(int argc, char *argv[])
 		{
 			;
 		}
-	  }
+	  }//end of switch
 	  //handle connection
+	  /* !not in use! we combing two list into one
 	  ConnectionToStateMapping<TCPState> newMapping;
 
     	  switch (state_map)
@@ -287,15 +357,7 @@ int main(int argc, char *argv[])
             	break;
     	  }
 
-	  /*SockRequestResponse write(WRITE,
-				    (*cs).connection,
-				     data,
-				     len,
-				     EOK);*/
-	 continue;
-	} 
-	
-	//If search failed, search time wait connection list
+	  */
 	/*cs = ctime_wait_list.FindMatching(c); 
 	if (cs!= ctime_wait_list.end())
 	{
@@ -303,8 +365,9 @@ int main(int argc, char *argv[])
 	}*/
 
 	//If search failed, go to listening connection
-	cs = clisten_list.FindMatchingSource(c);
+	//cs = clisten_list.FindMatchingSource(c);
         //cs = clisten_list.FindMatching(c);
+	/*!not in use! we combine two list into one
 	if(cs!= clisten_list.end())
 	{
 	  cerr<<"Now we handle listen!"<<endl;
@@ -342,30 +405,31 @@ int main(int argc, char *argv[])
             }
 	  }
 	  continue;
-	}
+	}*/
 	//else
 	//{
-	  MinetSendToMonitor(MinetMonitoringEvent("Unknown port, sending ICMP error message"));
+	  /*MinetSendToMonitor(MinetMonitoringEvent("Unknown port, sending ICMP error message"));
 	  IPAddress source;
 	  ipHeader.GetSourceIP(source);
 	  ICMPPacket error(source,DESTINATION_UNREACHABLE,PORT_UNREACHABLE,p);
 	  MinetSendToMonitor(MinetMonitoringEvent("ICMP error message has been sent to host"));
-	  MinetSend(mux, error);
-	//}
-      }
+	  MinetSend(mux, error);*/
+	}//end of connection list handling
+      }//end of handling mux
 
       //  Data from the Sockets layer above  //
       if (event.handle==sock) {
 	//A SockRequestResponse
 	//contains a request type, a Connection , a Buffer containing data,
 	//a byte count, and an error code.
+	cerr <<"App level request response!"<<endl;
 	SockRequestResponse s;//first handle unserialization
 	MinetReceive(sock,s);
 	cerr << "Received Socket Request:" << s << endl;
 
 	ConnectionList<TCPState>::iterator cs = clist.FindMatching(s.connection);
-        if(cs == clist.end())
-          cs = clisten_list.FindMatching(s.connection);
+        //if(cs == clist.end())
+        //  cs = clisten_list.FindMatching(s.connection);
 
 	switch (s.type) {
 	case CONNECT: //active open to remote, client
@@ -389,12 +453,14 @@ int main(int argc, char *argv[])
 	  
 	  //send a status response
 	  SockRequestResponse repl;
+	  repl.connection = s.connection;
 	  repl.type=STATUS;
 	  repl.bytes =0;
 	  repl.error=EOK;
 	  MinetSend(sock,repl);
 	}
 	 break;
+
 	case ACCEPT:  //passive open from remote,server listening
 	 { 
 	   cerr<<"Handle socket request state ACCEPT";
@@ -405,7 +471,7 @@ int main(int argc, char *argv[])
 	     TCPState newState = TCPState(generateISN(), LISTEN, timeTries);
 	    
 	     ConnectionToStateMapping<TCPState> connState(s.connection, Time()+80, newState, false);
-	     clisten_list.push_front(connState); 
+	     clist.push_front(connState); 
 	     
 	     SockRequestResponse repl;// handle serialization
 	     repl.type=STATUS;
