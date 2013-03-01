@@ -163,12 +163,14 @@ int main(int argc, char *argv[])
 	{
           Connection listen;
 	  listen.src = MyIPAddr;
-	  listen.srcport = c.srcport;
+	  listen.srcport = c.srcport;//itself
+	  listen.destport = 0;//nothing
 	  listen.dest = IP_ADDRESS_LO; //0.0.0.0
 	  listen.protocol = IP_PROTO_TCP;
 	 
 	  TCPState newState(generateISN(), LISTEN, 3);
 	  ConnectionToStateMapping<TCPState> newMapping(listen, Time()+80, newState, false);
+	  newMapping.bTmrActive = false; //stop timer
 	  //newMapping.state.SetLastRecvd(seqNum);
 	  clist.push_front(newMapping);
 	  cerr<<"[SYN RCVD]We bind a port to listen!"<<endl;
@@ -188,7 +190,12 @@ int main(int argc, char *argv[])
 	
 	//if(cs == clist.end())
 	//cerr<<"connection not found!"<<endl; 
-	if (cs!=clist.end()) {
+	else
+	{
+	  cerr<<"Now we start searching connectionlist!"<<endl;
+          //Demultiplexing packet, first search open connection list
+          ConnectionList<TCPState>::iterator cs = clist.FindMatching(c);//if source matchs(server ip etc), then continue
+	  if (cs!=clist.end()) {
 	  cerr<<"Now start to working on mux states"<<endl;
 	  //Now handle connection state for open connection list
 	  ConnectionToStateMapping<TCPState> &connState = *cs;
@@ -415,6 +422,8 @@ int main(int argc, char *argv[])
 	  MinetSendToMonitor(MinetMonitoringEvent("ICMP error message has been sent to host"));
 	  MinetSend(mux, error);*/
 	}//end of connection list handling
+       }//end of else
+	//else cerr<<"Cannot find port"<<endl;
       }//end of handling mux
 
       //  Data from the Sockets layer above  //
