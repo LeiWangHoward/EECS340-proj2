@@ -494,34 +494,29 @@ int main(int argc, char *argv[])
 	  }
 	  continue;
 	}*/
-	//else
-	//{
-	  /*MinetSendToMonitor(MinetMonitoringEvent("Unknown port, sending ICMP error message"));
-	  IPAddress source;
-	  ipHeader.GetSourceIP(source);
-	  ICMPPacket error(source,DESTINATION_UNREACHABLE,PORT_UNREACHABLE,p);
-	  MinetSendToMonitor(MinetMonitoringEvent("ICMP error message has been sent to host"));
-	  MinetSend(mux, error);*/
 	}//end of connection list handling
        }//end of else
 	//else cerr<<"Cannot find port"<<endl;
       }//end of handling mux
 
-      //  Data from the Sockets layer above  //
-      if (event.handle==sock) {
+      //  Data from the Sockets layer above , client level stuff
+      if (event.handle==sock) {//Enhanced with GO-BACK-N
+	Packet p_out; //packet to send out
+	Buffer sendData;
+	SockRequestResponse repl;
 	//A SockRequestResponse
 	//contains a request type, a Connection , a Buffer containing data,
 	//a byte count, and an error code.
 	cerr <<"App level request response!"<<endl;
-	SockRequestResponse s;//first handle unserialization
-	MinetReceive(sock,s);
-	cerr << "Received Socket Request:" << s << endl;
+	SockRequestResponse req;//first handle unserialization
+	MinetReceive(sock,req);
+	cerr << "Received Socket Request:" << req << endl;
 
-	ConnectionList<TCPState>::iterator cs = clist.FindMatching(s.connection);
-        //if(cs == clist.end())
-        //  cs = clisten_list.FindMatching(s.connection);
+	ConnectionList<TCPState>::iterator cs = clist.FindMatching(req.connection);
+        if(cs == clist.end()){
+	//connection does not exist
 
-	switch (s.type) {
+	switch (req.type) {
 	case CONNECT: //active open to remote, client
 	{
 	  cerr<<"Handle socket request state CONNECT"<<endl;
@@ -530,20 +525,21 @@ int main(int argc, char *argv[])
 	  TCPState newState = TCPState(generateISN(), SYN_SENT, timeTries);
 	  
 	  //Connection c = s.connection; 
-	  //ConnectionToStateMapping<TCPState> connState(c, Time()+80, newState, false);
-	  ConnectionToStateMapping<TCPState> connState;
-	  connState.connection = s.connection;
-	  connState.state = newState;
-	  connState.state.SetLastSent(connState.state.GetLastSent()+1);
-	 
+	  ConnectionToStateMapping<TCPState> connState(req.connection, Time()+5, newState, true);
+	  sendPacket(mux, connState, 0, SIG_SYN);	
+	  if(handshake) //we are trying to establish a connection using 3-way handshake
+	  {
+	    sleep(2);
+	    sendPacket(mux, connState, 0, SIG_SYN);
+	    handshake = false;
+	  }
 	  //for active open, send a SYN packet  
 	  sendPacket(mux, connState, 0, SIG_SYN);
-	  
-	  clist.push_front(connState);
-	  
+	  connState.state.SetLastSent(connState.state.GetLastSent()+1);
+	  clist.push_back(connState);
+	  cerr<<"	New connection(with SYN_SENT) added to connection list!"<<endl; 
 	  //send a status response
-	  SockRequestResponse repl;
-	  repl.connection = s.connection;
+	  repl.connection = req.connection;
 	  repl.type=STATUS;
 	  repl.bytes =0;
 	  repl.error=EOK;
@@ -560,12 +556,11 @@ int main(int argc, char *argv[])
 	     // passive open, new ISN for server side
 	     TCPState newState = TCPState(generateISN(), LISTEN, timeTries);
 	    
-	     ConnectionToStateMapping<TCPState> connState(s.connection, Time()+80, newState, false);
-	     clist.push_front(connState); 
-	     
-	     SockRequestResponse repl;// handle serialization
+	     ConnectionToStateMapping<TCPState> connState(req.connection, Time(), newState, false);
+	     clist.push_back(connState); 
+	     cerr<<"	New connection(LISTEN) added to connection list!"<<endl;
 	     repl.type=STATUS;
-	     repl.connection=s.connection;
+	     repl.connection=req.connection;
 	     // buffer is zero byte
 	     repl.bytes=0;
 	     repl.error=EOK;
@@ -576,65 +571,25 @@ int main(int argc, char *argv[])
 	// case SockRequestResponse::WRITE:
 	case WRITE:
 	 {
-	//TODO: connection refer to previous CONNECT and ACCEPT pp15
-	   unsigned bytes=s.data.GetSize();
-	    // create the payload of the packet
-	   Packet p(s.data.ExtractFront(bytes));
-	    // Make the IP header first since we need it to do the tcp checksum
-	   IPHeader ih;
-	   ih.SetProtocol(IP_PROTO_TCP);
-	   ih.SetSourceIP(s.connection.src);
-	   ih.SetDestIP(s.connection.dest);
-	   //ih.SetTotalLength(bytes+TCP_HEADER_LENGTH+IP_HEADER_BASE_LENGTH);TODO
-	   // push it onto the packet
-	   p.PushFrontHeader(ih);
-	   // Now build the TCP header
-	   // notice that we pass along the packet so that the udpheader can find
-	   // the ip header because it will include some of its fields in the checksum
-	   TCPHeader th;
-	   th.SetSourcePort(s.connection.srcport,p);
-	   th.SetDestPort(s.connection.destport,p);
-	   //th.SetLength(UDP_HEADER_LENGTH+bytes,p);TODO
-	   // Now we want to have the tcp header BEHIND the IP header
-	   p.PushBackHeader(th);
-	   MinetSend(mux,p);
-	   SockRequestResponse repl;
-	   //repl.type=SockRequestResponse::STATUS;
 	   repl.type=STATUS;
-	   repl.connection = s.connection;
-	   repl.bytes=bytes;
-	   repl.error=EOK;
-	   MinetSend(sock,repl);
-	//TODO: write generate multiple segments instead of only one (compared with UDP)
-	
+	   repl.connection = req.connection;
+	   repl.bytes=0;
+	   repl.error=ENOMATCH;
+	   MinetSend(sock,repl);	
 	 }
 	 break;
 	case FORWARD:
 	 {
-	   //ignore this message, resurn error STATUS
-	   SockRequestResponse repl;
-	   repl.type = STATUS;
-	   repl.error = EOK;
-	   MinetSend(sock,repl);
+	   ;//ignore this message
          }
 	 break;
         case CLOSE:
-	 {
-	   ConnectionList<TCPState>::iterator cs = clist.FindMatching(s.connection);
-            SockRequestResponse repl;
-            repl.connection=s.connection;
-            repl.type=STATUS;
-            if (cs==clist.end()) {
-              repl.error=ENOMATCH;
-            } else {
-              repl.error=EOK;
-              clist.erase(cs);
-            }
-            MinetSend(sock,repl);
-	   /*TODO:close connection. The connection represents the connection to match on
-		and all other fields are ignored. If there is a matching connection,
-		this will close it. Otherwise it is an error. A STATUS with the same connection
-		and an error code will be returned. STATUS: status update.*/
+	{
+	   repl.type=STATUS;
+           repl.connection = req.connection;
+           repl.bytes=0;
+           repl.error=ENOMATCH;
+           MinetSend(sock,repl);
 	 }
 	 break;
 	case STATUS:
@@ -653,6 +608,83 @@ int main(int argc, char *argv[])
 	   MinetSend(sock,repl);
 	 }
         }//end of switch
+       }//end of handle no connection findi
+       else {//handle existing connection
+	cout<<"[Find Connection]"<<endl;
+    	int state = cs->state.GetState();
+    	Buffer sendData;
+    	switch (req.type) {
+    	case CONNECT:
+	 {
+      	   cerr<<"	Connect event"<<endl;
+	 }
+      	  break;
+    	case ACCEPT:
+	{
+      	   cerr<<"	Accept event"<<endl;    
+    	}
+      	 break;
+    	case STATUS: 
+	{
+      	   cerr<<"	STATUS event"<<endl;
+      	  if(state == ESTABLISHED) {
+	   cs->state.RecvBuffer.Erase(0,req.bytes);//erase sent data
+	   if (cs->state.SendBuffer.GetSize()!=0) //more segments needs to be send
+	   {
+	     cout<<"		More data segments needs to be sent"<<endl;
+	     writeToApplication(sock,cs->connection, cs->state.RecvBuffer);//TODO
+	   }
+	  }
+	}
+	 break;
+	case WRITE:
+	{
+	  cerr<<"	WRITE event "<<endl;
+      	  if(state == ESTABLISHED) {
+		if(cs->state.SendBuffer.GetSize()+req.data.GetSize() > cs->state.TCP_BUFFER_SIZE) {
+            	  repl.type = STATUS;
+	  	  repl.connection = req.connection;
+	  	  repl.bytes = 0;
+	  	  repl.error = EBUF_SPACE;
+	  	  MinetSend(sock, repl);	
+		}
+		else {cs->state.SendBuffer.AddBack(req.data);}
+	   }
+	 else cerr<<"		Invalid state"<<endl;
+	}
+	case FORWARD:
+	{
+	  cerr<<"	FORWARD event: Nothing needs to be done!"<<endl;
+	}
+	case CLOSE:
+	{
+	  cerr<<"	CLOSE event "<<endl;
+	  if(state == ESTABLISHED) {
+	    cerr<<"		[Current state] ESTABLISHED"<<endl;
+	    ConnectionToStateMapping<TCPState>& connState = *cs;
+	    sendPacket(mux, connState, 0, SIG_FIN);
+	    connState.state.SetLastSent(cs->state.GetLastSent()+1);
+	    connState.state.SetState(FIN_WAIT1);
+	  }
+	  else if(state == CLOSED) {
+		cerr<<"		[Current state] CLOSED"<<endl;
+		repl.type = STATUS;
+		repl.connection = req.connection;
+		repl.bytes = 0;
+		repl.error = EOK;
+		MinetSend(sock, repl);
+		clist.erase(cs);
+		cerr<<"		Erased a connection"<<endl;
+	 }	
+      	 else {
+	  cerr<<"		Invalid state"<<endl;
+      	 }
+	}
+	break;
+	default:
+	break;	
+       }//end of switch
+     }//end of find connection
      }//end of "if"
     }//end of "else"
   }//end of "while" loop
