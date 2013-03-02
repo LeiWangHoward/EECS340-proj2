@@ -26,7 +26,7 @@ using std::string;
 
 //Prototype
 //create packet
-void sendPacket(const MinetHandle &mux, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal, bool sender = false);
+void sendPacket(const MinetHandle &mux, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal);
 void receivePacket(const MinetHandle &mux, const MinetHandle &sock, Buffer recv_data, unsigned char flags, unsigned int ackNum, unsigned int seqNum, unsigned short tcpLen, ConnectionToStateMapping<TCPState>& constate, Connection c);
 void writeToApplication( const MinetHandle & sock, Connection c, const Buffer &b );
 void EmptyWriteToApplication( const MinetHandle & sock, Connection c);
@@ -54,7 +54,8 @@ int main(int argc, char *argv[])
   MinetHandle mux, sock;//Multiplexor and Socket
 
   ConnectionList<TCPState> clist;		//Open connections
-  ConnectionList<TCPState> clisten_list;   	//Listening connections 
+ // ConnectionList<TCPState> clisten_list;   	//Listening connections 
+  ConnectionList<TCPState> eraseList;
   MinetInit(MINET_TCP_MODULE);//initialize tcp module
 
   //MinetIsModuleConfig(): Check to see if lower module is on the run time configuration
@@ -85,9 +86,114 @@ int main(int argc, char *argv[])
 	|| event.direction!=MinetEvent::IN) {
       MinetSendToMonitor(MinetMonitoringEvent("[Unknown event] Ignored!"));
     // if we received a valid event from Minet, do processing
-    } else if (event.eventtype == MinetEvent::Timeout) {
-	//TODO handle timeout
-	}
+    } 
+    else if (event.eventtype == MinetEvent::Timeout) {
+	Time nowTime;
+  	for(ConnectionList<TCPState>::iterator cs = clist.begin(); cs!=clist.end(); cs++) {
+    	  if(!cs->bTmrActive)//ignore these who have not open time up
+      	    continue;
+    	  if(nowTime >= cs->timeout) {
+      	    cerr<<"Now handle timeout!"<<endl;
+	    ConnectionToStateMapping<TCPState> &connState = *cs;
+	    switch (connState.state.GetState()) {
+      	     case SYN_SENT: 
+	     {
+		if(connState.state.ExpireTimerTries()) {
+	  	 cerr<<"Limit time of tries excedded!"<<endl;
+	  	 Buffer buffer;
+	  	 SockRequestResponse reply(WRITE, cs->connection, buffer, 0, ECONN_FAILED);
+	  	 MinetSend(sock, reply);
+	  	 connState.bTmrActive = false;//close timer
+	  	 connState.state.SetState(CLOSING);
+		}
+		else {
+	  	 cerr<<"[Resend SYN]"<<endl;
+		 sendPacket(mux, connState, 0, SIG_SYN);
+	  	 cs->timeout = nowTime+10;
+		}
+      	    }
+	     break;
+      	    case SYN_RCVD: 
+	    {
+		if(connState.state.ExpireTimerTries()) {
+	  	cerr<<"Limit time of tries excedded!"<<endl;
+	  	connState.bTmrActive = false;
+	  	connState.state.SetState(LISTEN);
+		}
+		else 
+		{
+	  	 cerr<<"[Resend SYN_ACK]"<<endl;
+	         sendPacket(mux,connState, 0, SIG_SYN_ACK);
+	 	 connState.timeout = nowTime+10;
+		}
+      	    }
+	     break;
+
+      	   case TIME_WAIT: 
+	   {
+		cerr<<"[TIME_WAIT] add connection to erase list"<<endl;
+		clist.erase(cs);//eraseList.push_back(cs);
+	   }
+	    break;
+      
+	  case ESTABLISHED: 
+	  {
+	    if(connState.state.last_acked < connState.state.last_sent) {//lost packet
+	  	connState.bTmrActive = true;
+	  	connState.timeout = Time()+30;
+		Buffer sendBuf = connState.state.SendBuffer;
+		sendBuf = sendBuf.ExtractFront(connState.state.last_sent - connState.state.last_acked);
+	  	unsigned int sentTotal = 0;
+		unsigned int leftTotal = sendBuf.GetSize();
+	  	unsigned int NEEDS_SENT = connState.state.GetN()- leftTotal- TCP_MAXIMUM_SEGMENT_SIZE;
+	     while(leftTotal!=0 && sentTotal < NEEDS_SENT) {
+	        unsigned int bytes = (leftTotal < TCP_MAXIMUM_SEGMENT_SIZE)? leftTotal:TCP_MAXIMUM_SEGMENT_SIZE;
+	    	cerr<<"Already sent:" << sentTotal<<". Still "<<bytes<<" left."<<endl;
+	    	Packet packet = sendBuf.Extract(0,bytes);
+		unsigned char flags = 0;
+  		int packetLen = bytes + TCP_HEADER_BASE_LENGTH + IP_HEADER_BASE_LENGTH;
+  		IPHeader iph;
+  		TCPHeader tcph;
+  		IPAddress src = connState.connection.src;
+  		IPAddress dest = connState.connection.dest;
+  		unsigned short srcPort = connState.connection.srcport;
+  		unsigned short destPort = connState.connection.destport;
+  		iph.SetSourceIP(src);
+  		iph.SetDestIP(dest);
+  		iph.SetTotalLength(packetLen);
+  		iph.SetProtocol(IP_PROTO_TCP);
+		
+		packet.PushFrontHeader(iph);
+		
+		SET_PSH(flags);
+    		SET_ACK(flags);
+		tcph.SetSourcePort(srcPort, packet);
+  		tcph.SetDestPort(destPort, packet);
+  		tcph.SetHeaderLen(TCP_HEADER_BASE_LENGTH, packet);
+  		tcph.SetFlags(flags, packet);
+  		tcph.SetAckNum(connState.state.GetLastRecvd(), packet);
+		tcph.SetSeqNum(connState.state.GetLastSent()+1, packet);
+		tcph.SetWinSize(connState.state.GetRwnd(), packet);
+  		tcph.SetUrgentPtr(0, packet);
+	    
+	    	MinetSend(mux, packet);
+	    	connState.state.SetLastSent(connState.state.GetLastSent()+bytes);
+	    	sentTotal += bytes; 
+	    	leftTotal -= bytes;
+	  	}
+	    }
+	    else {
+	  	connState.bTmrActive = false;
+	   }
+        }
+	break;
+       
+       default:
+	break;
+      }//switch
+     }    
+     }
+   }
      else{
       cerr<<"Now start hande mux or sock!"<<endl;
       if (event.handle==mux) {
@@ -691,7 +797,7 @@ int main(int argc, char *argv[])
   return 0;
 }
 
-void sendPacket(const MinetHandle &mux, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal, bool sender)
+void sendPacket(const MinetHandle &mux, ConnectionToStateMapping<TCPState>& constate, int dataLen, int signal)
 {
 
   unsigned char flags = 0;//temp flag
@@ -758,12 +864,7 @@ void sendPacket(const MinetHandle &mux, ConnectionToStateMapping<TCPState>& cons
   tcph.SetHeaderLen(TCP_HEADER_BASE_LENGTH,packet);
   tcph.SetFlags(flags,packet);
   tcph.SetAckNum(constate.state.GetLastRecvd(), packet);
-  if(sender) {
-    tcph.SetSeqNum(constate.state.GetLastSent()+1, packet);
-  }
-  else {
-    tcph.SetSeqNum(constate.state.GetLastAcked()+1, packet);
-  }
+  tcph.SetSeqNum(constate.state.GetLastAcked()+1, packet);
   tcph.SetWinSize(constate.state.GetRwnd(), packet);
   tcph.SetUrgentPtr(0,packet);
 
